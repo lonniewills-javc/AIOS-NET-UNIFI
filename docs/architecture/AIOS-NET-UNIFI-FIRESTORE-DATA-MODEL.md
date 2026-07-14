@@ -1,34 +1,35 @@
 # AIOS-NET-UNIFI Firestore Data Model
 
 - **Document ID:** DOC-AIOS-NET-UNIFI-DATA-20260714-0001
-- **Version:** 1.0
+- **Version:** 1.1
 - **Status:** Active / Architecture Baseline
 - **Project:** AIOS-NET-UNIFI
 - **Owners:** Lonnie Wills / Jeff Harrison
+
+## Governing Firestore placement
+
+This project uses the shared governed AIOS Firestore database and follows the accepted domain-root architecture.
+
+```text
+domains/aiosNet/projects/AIOS-NET-UNIFI
+```
+
+It does not create a competing top-level database layout.
 
 ## Design principles
 
 1. Stable inventory is separate from high-frequency observations.
 2. Telemetry and events are immutable and idempotent.
-3. Common dashboards read aggregates, not large raw scans.
+3. Dashboards read aggregates for common views rather than scanning raw telemetry.
 4. Findings retain evidence references so conclusions can be reproduced.
 5. Client data is privacy-limited and pseudonymous by default.
-6. Every document carries source, schema, and ingestion metadata.
-
-## Root namespace
-
-All project data is contained under:
-
-```text
-projects/AIOS-NET-UNIFI
-```
-
-The project document contains status, environment references, active schema version, retention policy version, and timestamps. No secret values are stored here.
+6. Every record carries source, schema, collector, and ingestion metadata.
+7. No secrets are stored in Firestore.
 
 ## Collection map
 
 ```text
-projects/AIOS-NET-UNIFI
+domains/aiosNet/projects/AIOS-NET-UNIFI
 ├── controllers/{controllerId}
 ├── sites/{siteId}
 │   ├── devices/{deviceId}
@@ -47,20 +48,19 @@ projects/AIOS-NET-UNIFI
 ├── collectionRuns/{runId}
 ├── collectorHealth/{collectorId}
 ├── reports/{reportId}
-└── identityMappings/{mappingId}   # restricted, optional
+└── identityMappings/{mappingId}   # restricted and optional
 ```
 
-## Common metadata fields
-
-Every stored record should include the applicable fields:
+## Common metadata
 
 ```json
 {
   "projectId": "AIOS-NET-UNIFI",
+  "domain": "aiosNet",
   "controllerId": "controller-main",
   "siteId": "javc-main",
   "sourceSystem": "UNIFI_NETWORK",
-  "sourceVersion": "unknown-until-discovered",
+  "sourceVersion": "discovered-at-runtime",
   "schemaVersion": 1,
   "collectorVersion": "0.1.0",
   "observedAt": "Timestamp",
@@ -75,17 +75,11 @@ Every stored record should include the applicable fields:
 
 ### controllers/{controllerId}
 
-Purpose: records the controller/application identity and API capability profile.
-
-Core fields:
-
 ```text
 controllerId, name, baseUrlFingerprint, controllerType,
 networkApplicationVersion, apiMode, status, lastSeenAt,
 capabilities[], siteIds[], schemaVersion
 ```
-
-`baseUrlFingerprint` is a non-secret normalized identifier. Do not store credentials or credential-bearing URLs.
 
 ### sites/{siteId}
 
@@ -95,8 +89,6 @@ timezone, status, lastInventorySyncAt, tags[]
 ```
 
 ### sites/{siteId}/devices/{deviceId}
-
-Supports gateways, switches, APs, and other adopted devices.
 
 ```text
 deviceId, sourceDeviceId, macHash, name, model, deviceType,
@@ -126,9 +118,9 @@ wlanId, name, enabled, bandPolicy, vlanId, securityMode,
 broadcastingApGroupIds[], guestNetwork, configurationFingerprint
 ```
 
-Do not store Wi-Fi passwords or private keys.
+Wi-Fi passwords, API keys, private keys, and controller credentials are prohibited.
 
-## Observation objects
+## Telemetry objects
 
 ### sites/{siteId}/radioObservations/{observationId}
 
@@ -138,24 +130,20 @@ Recommended deterministic ID:
 {radioId}_{observedAtEpochMinute}
 ```
 
-Fields:
-
 ```text
 observationId, apId, radioId, band, channel, channelWidthMhz,
 transmitPowerDbm, clientCount, channelUtilizationPct,
 wifiTxUtilizationPct, wifiRxUtilizationPct,
-interferenceUtilizationPct, noiseFloorDbm,
-retryRatePct, txBytesDelta, rxBytesDelta,
+interferenceUtilizationPct, metricSemantics,
+noiseFloorDbm, retryRatePct, txBytesDelta, rxBytesDelta,
 txPacketsDelta, rxPacketsDelta, txErrorsDelta, rxErrorsDelta,
 radarDetected, scanState, sampleIntervalSeconds,
 qualityFlags[], rawPayloadRef|null
 ```
 
-`interferenceUtilizationPct` must preserve the source semantic. If UniFi exposes only an "other" airtime value, record the metric name and interpretation in `qualityFlags` or a `metricSemantics` field rather than overstating certainty.
+If UniFi exposes only "other airtime," `metricSemantics` must preserve that fact. The system may not relabel ambiguous source data as scientifically identified interference.
 
 ### sites/{siteId}/observations/{observationId}
-
-AP/site health snapshot:
 
 ```text
 observationId, deviceId, apId|null, status, uptimeSeconds,
@@ -165,8 +153,6 @@ rxThroughputBps, clientCount, radioSummary, qualityFlags[]
 ```
 
 ### sites/{siteId}/clientSummaries/{summaryId}
-
-Default is aggregate or pseudonymous, not personally identifying.
 
 ```text
 summaryId, pseudonymousClientId|null, apId, radioId, band,
@@ -187,9 +173,7 @@ occurredAt, clearedAt|null, messageNormalized,
 sourceCode, correlationKeys[], acknowledged=false
 ```
 
-Examples include AP offline/online, uplink changes, DFS/radar events, high retries, repeated client disconnects, and collector-detected threshold crossings.
-
-## Analysis objects
+## Findings and incidents
 
 ### sites/{siteId}/findings/{findingId}
 
@@ -202,7 +186,7 @@ evidenceRefs[], metricSummary, analysisRuleId,
 analysisRuleVersion, createdAt, updatedAt
 ```
 
-Finding types initially include:
+Initial finding types:
 
 ```text
 HIGH_INTERFERENCE
@@ -224,25 +208,22 @@ COLLECTOR_DATA_GAP
 ```text
 incidentId, title, severity, status, openedAt, resolvedAt|null,
 owner, findingIds[], affectedDeviceIds[], impactSummary,
-rootCause|null, remediation|null, validationEvidenceRefs[],
-history[]
+rootCause|null, remediation|null, validationEvidenceRefs[], history[]
 ```
 
 ## Aggregates
 
 ### hourlyAggregates/{aggregateId}
 
-ID example:
-
 ```text
-{radioId}_2026-07-14T18
+{radioId}_{YYYY-MM-DDTHH}
 ```
 
-Store count, min, max, average, percentile values, missing-sample count, and threshold-duration minutes for the key metrics.
+Store sample count, missing-sample count, min, max, average, percentiles, and threshold-duration minutes.
 
 ### dailyAggregates/{aggregateId}
 
-Store daily health summaries and peak windows for long-term trending.
+Store daily health summaries, peaks, recurrence windows, and trend indicators.
 
 ## Collector operations
 
@@ -270,27 +251,25 @@ lastSuccessfulRunAt, consecutiveFailures, activeControllerIds[],
 configurationFingerprint, deploymentRevision
 ```
 
-## Index plan
+## Initial indexes
 
-Initial composite indexes should support:
+- Radio observations: `radioId + observedAt desc`.
+- Findings: `status + severity + lastObservedAt desc`.
+- Events: `eventType + occurredAt desc`.
+- Incidents: `status + openedAt desc`.
+- Collection runs: `status + startedAt desc`.
+- Aggregates: `apId/radioId + bucketStart desc`.
 
-- Radio observations by `radioId + observedAt desc`.
-- Findings by `status + severity + lastObservedAt desc`.
-- Events by `eventType + occurredAt desc`.
-- Incidents by `status + openedAt desc`.
-- Collection runs by `status + startedAt desc`.
-- Aggregates by `apId/radioId + bucketStart desc`.
-
-Index creation must be driven by real queries and reviewed for cost.
+Indexes must be driven by real application queries and reviewed for cost.
 
 ## Access roles
 
 ```text
-collector: create inventory/telemetry/events and update collector state
-analyzer: read telemetry/events and create/update findings
-operator: read all operational data; update findings/incidents/acknowledgements
+collector: create inventory, telemetry, events, and collector state
+analyzer: read telemetry/events and create or update findings
+operator: read operational data and manage findings/incidents
 viewer: read sanitized dashboard collections and reports
-admin: manage policies, roles, and restricted identity mappings
+admin: manage policies, access, and restricted identity mappings
 ```
 
-Client applications must never receive UniFi secrets or unrestricted identity mappings.
+Browser clients never receive UniFi secrets or unrestricted identity mappings.
