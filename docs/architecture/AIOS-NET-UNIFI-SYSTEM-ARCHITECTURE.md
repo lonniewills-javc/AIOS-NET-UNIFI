@@ -1,229 +1,176 @@
 # AIOS-NET-UNIFI System Architecture
 
 - **Document ID:** DOC-AIOS-NET-UNIFI-ARCH-20260714-0001
-- **Version:** 1.0
+- **Version:** 1.1
 - **Status:** Active / Architecture Baseline
 - **Project:** AIOS-NET-UNIFI
 - **Parent project:** AIOS-NET
 - **Owners:** Lonnie Wills / Jeff Harrison
 - **Date:** 2026-07-14
 
-## 1. Purpose
+## Purpose
 
-AIOS-NET-UNIFI provides independent, evidence-based monitoring and analysis of the JAVC UniFi network. It is intended to answer questions the native UniFi dashboard does not answer well, including:
+AIOS-NET-UNIFI independently collects, preserves, analyzes, and reports JAVC UniFi network telemetry so the organization can identify which AP, radio, band, channel, configuration, client pattern, or time window is contributing to interference and poor network performance.
 
-- Which AP, radio, band, channel, or time window is driving interference?
-- Is channel airtime consumed by valid Wi-Fi traffic, co-channel contention, adjacent-channel overlap, or likely non-Wi-Fi interference?
-- Are weak signals, retries, roaming, uplink constraints, or configuration choices contributing to poor client experience?
-- Are problems recurring at predictable times or locations?
-- What evidence supports a recommended network change?
+It is a governed AIOS infrastructure service, not merely a replacement dashboard.
 
-The system preserves historical telemetry so findings can be reproduced rather than relying on a changing dashboard snapshot.
+## Source-of-truth boundaries
 
-## 2. North Star alignment
+- **GitHub:** code, Markdown architecture, ADRs, security rules, indexes, and release history.
+- **AIOS:** project governance, ADR registry, tasks, objects, documentation registry, and handoffs.
+- **UniFi Network Controller:** authoritative source for current controller/device/network telemetry.
+- **Google Cloud Firestore:** governed operational and historical analytical store.
+- **Secret Manager/protected runtime configuration:** UniFi credentials and API tokens.
 
-AIOS-NET-UNIFI is a governed AIOS infrastructure project, not a standalone dashboard experiment.
+## Firestore placement
 
-- **Projects organize the work.** `AIOS-NET-UNIFI` is a child of `AIOS-NET`.
-- **Services execute the work.** UniFi access is isolated behind a controlled connector/service boundary.
-- **Memory preserves the work.** Firestore retains observations, events, findings, incidents, reports, and evidence.
-- **AI employees analyze and escalate.** Future AIOS services can read sanitized network health and create governed findings or incidents.
-- **Sensitive actions remain approval-gated.** Version 1 is read-only and cannot modify the production network.
+The project uses the existing governed AIOS Firestore database and domain-root pattern:
 
-## 3. Scope
+```text
+domains/aiosNet/projects/AIOS-NET-UNIFI
+```
 
-### In scope for Version 1
+It must not create a competing top-level Firestore architecture.
 
-- Read-only authentication to the local UniFi Network application or supported official API.
-- Controller, site, device, AP, radio, WLAN, client-summary, event, and alarm discovery.
-- Scheduled telemetry collection.
-- Firestore persistence using normalized schemas.
+## Version 1 scope
+
+### Included
+
+- Read-only UniFi authentication and API capability discovery.
+- Controller, site, gateway, switch, AP, radio, WLAN, client-summary, alarm, and event inventory.
+- Five-minute AP/radio telemetry collection, subject to controller performance testing.
+- Firestore persistence with normalized, versioned objects.
 - Hourly and daily aggregation.
-- Interference, contention, coverage, retry, uplink, and temporal-pattern analysis.
-- Operator dashboard and reports.
-- Findings, incidents, acknowledgements, and evidence history.
+- Interference, channel-contention, overlap, retry, coverage, capacity, uplink, DFS/radar, and temporal-pattern analysis.
+- Operator dashboard, findings, incidents, reports, acknowledgements, and collector-health views.
 - Read-only AIOS service integration.
 
-### Out of scope for Version 1
+### Excluded
 
-- Automatic changes to channels, channel width, transmit power, WLANs, VLANs, firewall rules, routing, firmware, adoption, or credentials.
-- Packet capture or payload inspection.
-- Employee or resident attendance tracking.
-- Browsing-history, DNS-content, message-content, or application-content monitoring.
-- Guaranteed identification of the exact physical source of non-Wi-Fi interference when the controller does not expose spectrum-identification data.
+- Automatic network configuration changes.
+- Packet payload inspection, browsing history, DNS-content monitoring, or message/application content collection.
+- Employee or resident attendance or movement tracking.
+- Claims that identify an exact physical interference source without supporting spectrum evidence.
 
-## 4. Architecture overview
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│                    UniFi Network Controller                  │
-│ Devices • Radios • Clients • Events • Alarms • Statistics    │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ read-only HTTPS/API
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     UniFi Connector Layer                    │
-│ Auth • Version discovery • Endpoint adapters • Normalization │
-│ Rate limiting • Retry • Redaction • Capability registry      │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ normalized contracts
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     Collection Orchestrator                  │
-│ Scheduler • Inventory sync • Telemetry polls • Checkpoints    │
-│ Idempotency • Collection runs • Health • Data-quality flags   │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ server-side writes
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│                   Google Cloud Firestore                     │
-│ Inventory • Telemetry • Events • Aggregates • Findings        │
-│ Incidents • Reports • Collector state • Policies              │
-└───────────────┬───────────────────────┬──────────────────────┘
-                │                       │
-                ▼                       ▼
-┌───────────────────────────┐  ┌───────────────────────────────┐
-│ Analysis & Correlation    │  │ Aggregation & Retention       │
-│ Rules • Trends • Evidence │  │ Hourly/daily rollups • TTL    │
-│ Confidence • Findings     │  │ Cost controls • Export path   │
-└───────────────┬───────────┘  └───────────────────────────────┘
-                │
-                ▼
-┌──────────────────────────────────────────────────────────────┐
-│                   Presentation & AIOS Layer                  │
-│ Network health dashboard • AP/radio history • Reports         │
-│ Finding workflow • Incident workflow • AIOS read services     │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## 5. Component responsibilities
-
-### 5.1 UniFi Connector Layer
-
-The connector is the only component permitted to communicate directly with the UniFi controller.
-
-Responsibilities:
-
-- Authenticate using server-side secrets.
-- Discover controller and Network application versions.
-- Discover which official or local endpoints are available.
-- Encapsulate version-specific response shapes.
-- Normalize source records into internal contracts.
-- Redact secrets and sensitive headers from logs.
-- Enforce rate limits, timeouts, retries, and circuit-breaker behavior.
-- Report capability gaps instead of fabricating unavailable metrics.
-
-The connector must preserve metric semantics. For example, if the controller exposes "other airtime" rather than a scientifically identified interference percentage, the normalized record must retain that distinction.
-
-### 5.2 Collection Orchestrator
-
-Responsibilities:
-
-- Execute scheduled collection policies.
-- Separate inventory synchronization from high-frequency telemetry polling.
-- Generate deterministic IDs for idempotent writes.
-- Track collection runs and checkpoints.
-- Detect missed samples, stale devices, and source failures.
-- Apply data-quality flags when fields are unavailable, delayed, estimated, or semantically ambiguous.
-
-Initial cadence:
+## Logical architecture
 
 ```text
-Controller/site/device inventory: every 15 minutes
-AP/radio operational telemetry: every 5 minutes
-Privacy-limited client summaries: every 5 minutes when enabled
-Events/alarms: every 1–5 minutes or incremental checkpoint
-Hourly aggregates: shortly after each hour
-Daily aggregates: shortly after local midnight
+UniFi Controller
+      │ read-only HTTPS/API
+      ▼
+UniFi Connector
+  authentication • version/capability discovery • endpoint adapters
+  normalization • rate limits • retries • redaction • circuit breaker
+      │ normalized contracts
+      ▼
+Collection Orchestrator
+  schedules • inventory sync • telemetry polling • checkpoints
+  deterministic IDs • data-quality flags • collector health
+      │ server-side writes
+      ▼
+Firestore: domains/aiosNet/projects/AIOS-NET-UNIFI
+  inventory • telemetry • events • aggregates • findings
+  incidents • reports • policies • collection runs • health
+      │
+      ├──────────────► Aggregation and retention
+      │                hourly/daily rollups • lifecycle cleanup
+      │
+      └──────────────► Analysis and correlation
+                       evidence windows • rules • confidence • findings
+                              │
+                              ▼
+Dashboard and AIOS Services
+  facility health • AP/radio matrix • history • channel plan
+  findings • incidents • reports • AIOS read actions
 ```
 
-Cadence is configuration and will be tuned after observing Firestore usage, API response time, and controller load.
+## Component responsibilities
 
-### 5.3 Firestore Persistence Layer
+### UniFi Connector
 
-Firestore is the governed Phase 1 data store.
+The connector is the only component that communicates directly with the controller.
 
-Data categories:
+It must:
 
-- Stable controller/site/device/AP/radio/WLAN inventory.
-- Immutable time-stamped observations.
-- Immutable normalized events and alarms.
-- Hourly and daily aggregates.
-- Derived findings and evidence references.
-- Operator incidents, acknowledgements, reports, and history.
-- Collection policies, runs, checkpoints, and collector health.
+- Use server-side, least-privileged read-only credentials.
+- Detect controller and Network application versions.
+- Register available endpoints and unavailable capabilities.
+- Normalize version-specific responses.
+- Preserve metric semantics. "Other airtime" may not be silently relabeled as proven non-Wi-Fi interference.
+- Redact credentials, tokens, cookies, and authorization headers.
+- Enforce timeouts, retries, rate limits, and circuit-breaker behavior.
+
+### Collection Orchestrator
+
+Initial configurable cadence:
+
+```text
+Inventory: every 15 minutes
+AP/radio telemetry: every 5 minutes
+Client summaries: every 5 minutes when enabled
+Events/alarms: every 1–5 minutes or by incremental checkpoint
+Hourly aggregates: after each hour
+Daily aggregates: after local midnight
+```
+
+The orchestrator records collection runs, checkpoints, missed samples, endpoint failures, documents written/skipped, controller latency, schema validation, and collector version.
+
+### Firestore Persistence
 
 Detailed objects are defined in `AIOS-NET-UNIFI-FIRESTORE-DATA-MODEL.md`.
 
-### 5.4 Aggregation and Retention
-
-Raw telemetry is valuable for root-cause analysis but expensive to keep indefinitely.
-
-Initial retention:
+Collection families are separated by purpose:
 
 ```text
-Raw radio/AP telemetry: 90 days
-Hourly aggregates: 13 months
-Daily aggregates: 36 months
-Events/alarms: 13 months unless incident-linked
-Findings/incidents/reports: operational history
-Collector logs: 30 days
+controllers
+sites / devices / accessPoints / radios / wlans
+observations / radioObservations / clientSummaries
+events
+findings / incidents
+hourlyAggregates / dailyAggregates
+collectionPolicies / collectionRuns / collectorHealth
+reports
+restricted identityMappings, only if separately justified
 ```
 
-Aggregation must complete before source records expire. Retention values are policy records and must not be scattered as hard-coded application constants.
+Stable inventory may be updated in place. Telemetry and events are append-only and idempotent. Findings reference evidence records so conclusions can be reproduced.
 
-### 5.5 Analysis and Correlation Engine
+### Analysis Engine
 
-The engine evaluates measurements over windows, not isolated samples.
+Initial rule families:
 
-Initial analyses:
-
-- High channel/interference utilization duration.
-- Valid Wi-Fi airtime versus unexplained/other airtime.
+- High interference or unexplained airtime sustained over a window.
+- Valid Wi-Fi airtime compared with other/unexplained airtime.
 - Co-channel contention among JAVC APs.
-- Adjacent-channel overlap and excessive channel width.
-- High retry rate combined with RSSI and client count.
+- Adjacent-channel overlap and excessive channel widths.
+- High retry rates correlated with RSSI, client count, and data rates.
 - Weak coverage and sticky-client patterns.
 - AP capacity pressure.
-- Uplink throughput or link-speed constraints.
+- Uplink constraints.
 - DFS/radar and channel-change correlation.
 - Time-of-day recurrence.
-- Data gaps and collector-health failures.
+- Collector data gaps.
 
-Each finding includes:
+Every finding includes severity, confidence, affected scope, time range, plain-language and technical summaries, recommendation, evidence references, and analysis-rule version.
 
-```text
-finding type
-severity
-affected site/AP/radio/band/channel
-first and last observed times
-confidence score
-technical summary
-plain-language summary
-recommended action
-evidence references
-analysis-rule version
-```
-
-The engine must use cautious language. It may classify a pattern as "non-Wi-Fi interference suspected" when evidence supports that inference, but it must not claim a microwave, camera, Bluetooth device, or other exact source without supporting spectrum evidence.
-
-### 5.6 Dashboard and Reporting
-
-The dashboard is an analytical view, not the source of truth.
+### Dashboard
 
 Initial views:
 
-1. **Facility health** — site status, active findings, worst APs/radios, and data freshness.
-2. **AP/radio matrix** — band, channel, width, power, clients, utilization, interference/other airtime, retries, and noise.
-3. **Historical charting** — metric trends by AP, radio, band, and time window.
-4. **Channel plan** — current channel reuse and overlap across JAVC APs.
-5. **Finding workbench** — evidence, confidence, recommendation, acknowledgement, and incident linkage.
-6. **Collector health** — last successful collection, endpoint failures, latency, and missing data.
-7. **Reports** — daily health brief, weekly trend report, and incident evidence package.
+1. Facility health and current findings.
+2. AP/radio matrix with channel, width, power, clients, utilization, other/interference airtime, retries, and noise.
+3. Historical charts by AP, radio, band, channel, and time.
+4. Channel plan and overlap view.
+5. Finding workbench with evidence and confidence.
+6. Incident and acknowledgement workflow.
+7. Collector health and data freshness.
+8. Daily and weekly reports.
 
-### 5.7 AIOS Service Integration
+The dashboard is a presentation surface; Firestore remains the operational source of truth.
 
-Version 1 exposes only read and documentation-oriented actions:
+### AIOS Integration
+
+Initial controlled actions:
 
 ```text
 READ_NETWORK_HEALTH
@@ -237,142 +184,70 @@ CREATE_NETWORK_INCIDENT
 ACKNOWLEDGE_NETWORK_FINDING
 ```
 
-AIOS actions operate through controlled services and sanitized Firestore views. They do not receive UniFi credentials or direct controller access.
+AIOS reads sanitized service results. It does not receive controller credentials or direct controller access.
 
-Future production mutations require a separate service, separate authority grant, explicit approval, rollback design, and accepted ADR.
+## Security and privacy
 
-## 6. Firestore object summary
+- Secrets exist only in an approved server-side secret store or protected runtime configuration.
+- Browser clients cannot write raw telemetry.
+- Client identifiers are pseudonymous by default.
+- Raw MAC addresses and reversible mappings are restricted and avoided unless operationally necessary.
+- No packet payloads or browsing content are collected.
+- Network telemetry cannot be repurposed for employee or resident surveillance without a separate accepted ADR, purpose limitation, and privacy/legal review.
+
+## Retention baseline
 
 ```text
-projects/AIOS-NET-UNIFI
-├── controllers
-├── sites
-│   ├── devices
-│   ├── accessPoints
-│   │   └── radios
-│   ├── wlans
-│   ├── observations
-│   ├── radioObservations
-│   ├── clientSummaries
-│   ├── events
-│   ├── findings
-│   ├── incidents
-│   ├── hourlyAggregates
-│   └── dailyAggregates
-├── collectionPolicies
-├── collectionRuns
-├── collectorHealth
-├── reports
-└── identityMappings  # optional and restricted
+Raw AP/radio telemetry: 90 days
+Hourly aggregates: 13 months
+Daily aggregates: 36 months
+Events and alarms: 13 months unless linked to an open incident
+Findings, incidents, acknowledgements, and reports: operational history
+Collector logs: 30 days
 ```
 
-## 7. Security architecture
+Retention is controlled through policy records and lifecycle jobs, not hard-coded throughout the application.
 
-### Authentication and secrets
+## Deployment direction
 
-- UniFi credentials/API tokens remain server-side.
-- Secrets use an approved secret manager or protected runtime configuration.
-- Secrets never enter GitHub, Firestore, AIOS sheets, browser bundles, URLs, reports, or logs.
-- The connector uses the least-privileged read-only integration available.
+The UniFi controller may only be reachable from the facility LAN. The preferred initial pattern is:
 
-### Firestore access roles
+```text
+On-premises collector → outbound encrypted Firestore writes
+Cloud/Firebase analysis and dashboard → Firestore reads
+```
 
-- **collector:** write inventory, telemetry, events, and collection state.
-- **analyzer:** read observations/events and write findings.
-- **operator:** read operational data and manage finding/incident workflow.
-- **viewer:** read sanitized dashboard and report data.
-- **admin:** manage policies, access, and restricted mappings.
+Cloud Run, Cloud Functions, or another server runtime may host aggregation, analysis, reports, and dashboard APIs. The final collector runtime decision follows controller version, API authentication, and network reachability inventory.
 
-Browser clients must not write raw telemetry or access restricted identity mappings.
+## Delivery phases
 
-### Privacy
+### Phase 0 — Environment and API inventory
 
-- Client identifiers are pseudonymous by default.
-- Raw MAC addresses and reversible identity mappings are restricted and avoided unless operationally necessary.
-- No packet payloads or browsing content are collected.
-- Wi-Fi telemetry may not be repurposed for resident or employee surveillance without explicit governance and privacy review.
+Confirm controller model, UniFi OS/Network versions, authentication method, accessible endpoints, metric semantics, and LAN reachability.
 
-## 8. Reliability and observability
+### Phase 1 — Firestore foundation and collector
 
-The monitor must monitor itself.
-
-Required operational signals:
-
-- Last successful inventory and telemetry runs.
-- Controller/API latency.
-- Per-endpoint failure counts.
-- Consecutive failures and circuit-breaker state.
-- Documents written, skipped, and rejected.
-- Missing sample windows.
-- Schema-validation failures.
-- Firestore write latency and quota/cost indicators.
-- Collector version and deployment revision.
-
-A failed collector must generate a data-gap finding so an apparently quiet network is not mistaken for a healthy network.
-
-## 9. Deployment direction
-
-The initial deployment should use Firebase/Google Cloud-aligned server-side components. The exact runtime may be Cloud Run, Cloud Functions, or another governed server process after controller reachability is confirmed.
-
-The local UniFi controller may not be reachable directly from a public cloud runtime. Supported deployment patterns include:
-
-1. **On-premises collector with outbound Firestore writes** — preferred when the controller is LAN-only.
-2. **Secure private network connection to a cloud collector** — considered only with explicit security design.
-3. **Hybrid collector** — local polling with cloud analysis/dashboard.
-
-The collector runtime decision will be recorded after controller model, Network version, authentication method, and LAN reachability are inventoried.
-
-## 10. Initial delivery phases
-
-### Phase 0 — Environment inventory
-
-- Confirm UniFi console/controller model.
-- Confirm UniFi OS and Network application versions.
-- Create least-privileged API integration.
-- Validate accessible endpoints and returned metrics.
-- Record metric semantics and capability gaps.
-
-### Phase 1 — Foundation
-
-- Initialize application/runtime.
-- Configure secrets and environment separation.
-- Create Firestore collections, security rules, and required indexes.
-- Implement inventory and radio telemetry collection.
-- Implement collection-run and collector-health records.
+Create security rules, indexes, collection policies, connector contracts, inventory sync, radio telemetry polling, collection-run records, and collector health.
 
 ### Phase 2 — Historical analysis
 
-- Add events/alarms and client summaries.
-- Add hourly/daily aggregation and retention.
-- Implement initial analysis rules.
-- Validate findings against known UniFi dashboard readings.
+Add events, alarms, privacy-limited client summaries, aggregates, retention, and initial findings. Validate against current UniFi readings.
 
-### Phase 3 — Operator experience
+### Phase 3 — Operator dashboard
 
-- Build facility-health, AP/radio, historical, channel-plan, finding, and collector-health views.
-- Add reports, acknowledgements, and incident workflow.
+Build facility health, AP/radio matrix, history, channel plan, findings, incidents, collector health, and reports.
 
 ### Phase 4 — AIOS integration
 
-- Add read-only AIOS service contracts.
-- Add scheduled network-health brief and finding escalation.
-- Preserve reports and incidents in project memory.
+Add controlled read services, network-health briefs, finding escalation, and project-memory preservation.
 
-## 11. Acceptance criteria for the architecture baseline
-
-The baseline is complete when:
-
-- GitHub contains the governing architecture, data model, and accepted ADRs.
-- AIOS contains matching project, ADR, documentation, and object records.
-- Firestore is the declared data store.
-- The collection model separates inventory, observations, events, findings, and operations.
-- Version 1 is explicitly read-only.
-- Privacy, retention, secrets, and approval boundaries are documented.
-- The next implementation task is controller/API capability inventory rather than premature dashboard coding.
-
-## 12. Related ADRs
+## Architecture decisions
 
 - `ADR-AIOS-NET-UNIFI-20260714-0001` — Use Google Cloud Firestore.
-- `ADR-AIOS-NET-UNIFI-20260714-0002` — Separate collection boundaries.
-- `ADR-AIOS-NET-UNIFI-20260714-0003` — Keep initial UniFi integration read-only.
+- `ADR-AIOS-NET-UNIFI-20260714-0002` — Separate inventory, telemetry, events, findings, and operations.
+- `ADR-AIOS-NET-UNIFI-20260714-0003` — Keep Version 1 read-only.
 - `ADR-AIOS-NET-UNIFI-20260714-0004` — Govern retention, privacy, and secrets.
+
+## Next implementation gate
+
+Do not begin dashboard coding first. The next task is to inventory the actual UniFi environment and capture real API responses so field mappings and metric semantics are grounded in the installed controller version.
