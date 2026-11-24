@@ -1,0 +1,32 @@
+name: UniFi Cloud Run
+on:
+  push:
+    branches: [main]
+    paths: ['diagnostics/**', 'Dockerfile', '.github/workflows/cloud-run.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s diagnostics -p 'test_*.py' -v
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: aios-320e3
+          workload_identity_provider: projects/317262402046/locations/global/workloadIdentityPools/github-actions/providers/aios-repository
+          service_account: aios-github-deployer@aios-320e3.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Deploy private service
+        run: |
+          gcloud run deploy javc-unifi-diagnostics --source . --project aios-320e3 --region us-west1 --no-allow-unauthenticated --service-account javc-unifi-diagnostics@aios-320e3.iam.gserviceaccount.com --set-secrets UNIFI_API_KEY=JAVC_AIOS_Unifi:latest --quiet
+      - name: Verify authenticated cloud connection
+        run: |
+          URL=$(gcloud run services describe javc-unifi-diagnostics --project aios-320e3 --region us-west1 --format='value(status.url)')
+          curl --fail --silent --show-error -H "Authorization: Bearer $(gcloud auth print-identity-token)" "$URL/v1/connectivity"
